@@ -9,3 +9,10 @@ A PHP multithread script that will perform a load test as well as monitor the se
 - PHP cURL
 - PHP Readline
 - PHP SSH2
+
+## How To Run
+- Edit config.ini as needed
+- run: 
+```
+php main.php
+```

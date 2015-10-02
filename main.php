@@ -1,34 +1,5 @@
 <?php
-//Check depedencies
-if(!class_exists('Thread')) {
-	die("You do not have the multithreading enabled for PHP");
-}
-
-$arrFunctions = array(
-		'readline',
-		'ssh2_connect',
-		'curl_init'
-);
-$arrMissing = array();
-foreach($arrFunctions as $function) {
-	if(!function_exists($function)) {
-		$arrMissing[] = $function;
-	}
-}
-
-if(!empty($arrMissing)) {
-	die("You are missing the following functions: ". implode(", ",$arrMissing));
-}
-
-
-//Set up globals
-if($val = getenv("SYSTEM_LOAD_LIMIT")) {
-	define("SYSTEM_LOAD_LIMIT",intval($val) > 0 ? intval($val) : 10);
-} else {
-	define("SYSTEM_LOAD_LIMIT",10);
-}
-
-date_default_timezone_set('America/Los_Angeles');
+require_once __DIR__.'/requirements.php';
 
 //Parse config
 $config = parse_ini_file(__DIR__.'/config.ini');
@@ -36,211 +7,27 @@ $config['threads'] = intval($config['threads']);
 $config['totalRequests'] = intval($config['totalRequests']);
 $config['timeBetweenRequest'] = intval($config['timeBetweenRequest']);
 
-//Create a load test function
-function goodSystemLoad() {
-	$avgs = sys_getloadavg();
-	
-	//Low system load with More available memory
-	if($avgs[0] < SYSTEM_LOAD_LIMIT ) {
-		return true;
-	} 
-	
-	return false;
+$arrPostData = array();
+foreach($config as $key => $value) {
+	if(stripos($key,"postdata") !== false) {
+		$arrPostData[] = $value;
+	}
 }
+
+//Setup Functions
+require_once __DIR__.'/functions.php';
 
 //Setup Threads
-class UrlThread extends Thread {
-	private $url = "";
-	private $rest = 0;
-	private $runtime = 0;
-	private $success = true;
-	
-	function __construct($url,$rest) {
-		$this->url = $url;	
-		$this->rest = $rest;
-	}
-	
-	function run() {
-		if($this->rest > 0) {
-			usleep($this->rest);
-		}
-		$start = microtime(true);
-		$curl = curl_init($this->url);
-		curl_setopt($curl, CURLOPT_RETURNTRANSFER, true);
-		curl_setopt($curl, CURLOPT_HEADER,true);
-		curl_setopt($curl, CURLOPT_FOLLOWLOCATION,true);
-		curl_exec($curl);
-		$this->runtime = microtime(true) - $start;
-		$info = curl_getinfo($curl);
-		curl_close($curl);
-		if($info['http_code'] != '200') {
-			$this->success = false;
-		}
-		$this->join();
-	}
-	
-	public function getSuccess() {
-		return $this->success;
-	}
-	
-	public function getRuntime() {
-		return $this->runtime;
-	}
-}
-
-class KillThread extends Thread {
-	private $killScript = false;
-	public $message = "To kill the script at any time. Press 'K' and then 'Enter'";
-	
-	function run() {
-		while(true) {
-			$line = readline("{$this->message}: \r\n");
-			if(strtolower($line) == 'k') {
-				$this->killScript = true;
-				break;
-			}
-		}
-		
-		$this->join();
-	}
-	
-	function shouldKillScript() {
-		return $this->killScript;
-	}
-}
+require_once __DIR__.'/URLThread.php';
+require_once __DIR__.'/KillThread.php';
 
 $LoadThread = null;
 if($config['enableSSH']) {
-	class ServerLoadThread extends Thread {
-		private $server = "";
-		private $username;
-		private $publickKey;
-		private $privateKey;
-		private $sshSource;
-		private $runThread;
-		private $loads;
-		private $average;
-		private $highest;
-		private $count;
-		private $isConnected;
-		
-		public function __construct($server) {
-			$this->server = $server;
-			$username = posix_getpwuid(posix_geteuid())['name'];
-			$this->username = $username;
-			
-			$this->publicKey = "/home/{$username}/.ssh/id_rsa.pub";
-			$this->privateKey = "/home/{$username}/.ssh/id_rsa";
-			
-			$this->sshSource = null;
-			$this->runThread = true;
-			$this->isConnected = false;
-			$this->loads = array();
-			$this->highest = 0;
-			$this->average = 0;
-			$this->count = 0;
-		}
-		
-		function run() {
-			$this->setPublicKey();
-			$this->setPrivateKey();
-			$this->getConnection();
-			$this->isConnected = true;
-			echo "Connected to {$this->server}\r\n";
-			$stream = null;
-			$loads = array();
-			$i = 0;
-			while($this->runThread) {
-				$stream = ssh2_exec($this->sshSource, 'uptime');
-				stream_set_blocking($stream, true);
-				$ret = stream_get_contents($stream);
-				fclose($stream);
-				$ret = preg_split("/[\t\s\,]+/",$ret);
-				$val = floatval($ret[count($ret)-3]);
-				$this->loads = $this->loads + array($i => $val);
-				if($val > $this->highest) {
-					$this->highest = $val;
-				}
-				$i++;
-				sleep(1);
-			}			
-			
-			$this->join();			
-		}
-		
-		private function setPublicKey() {
-			$publicKey = readline("Public Key [{$this->publicKey}]: ");
-			if(!empty($publicKey)) {
-				$this->publicKey =$publicKey;
-			}
-			
-			if(!file_exists($this->publicKey)) {
-				echo "\r\nFile Does Not Exists. ";
-				$this->setPublicKey();
-			}
-		}
-		
-		private function setPrivateKey() {
-			$privateKey = readline("Private Key [{$this->privateKey}]: ");
-			if(!empty($privateKey)) {
-				$this->privateKey =$privateKey;
-			}
-				
-			if(!file_exists($this->privateKey)) {
-				echo "\r\nFile Does Not Exists. ";
-				$this->setPrivateKey();
-			}
-		}
-		
-		private function getConnection() {
-			$username = readline("Username [{$this->username}]: ");
-			if(empty($username)) {
-				$username = $this->username;
-			}
-			$passphrase = readline("Passphrase: ");
-				
-			$resource = ssh2_connect($this->server,22,array('hostkey'=>'ssh-rsa'));
-			if(ssh2_auth_pubkey_file($resource, $username, $this->publicKey, $this->privateKey,$passphrase)) {
-				$this->sshSource = $resource;
-			} else {
-				echo "Failed to connect. ";
-				$this->getConnection();
-			}
-		}
-		
-		public function getAverage() {
-			if(count($this->loads) > 0) {
-				$sum = $this->average * $this->count;
-				foreach($this->loads as $load) {
-					$sum += $load;
-				}
-				$this->count += count($this->loads);
-				$this->average = $sum / $this->count;
-				$this->loads = array();
-			} else {
-				echo "array is empty\r\n";
-			}
-			
-			return $this->average;
-		}
-		
-		public function getHighestLoad() {
-			return $this->highest;
-		}
-		
-		public function isConnected() {
-			return $this->isConnected;
-		}
-		
-		public function stopThread() {
-			echo "Ending SSH connection\r\n";
-			$this->runThread = false;
-		}
-	}
-	
+	require_once __DIR__.'/ServerLoadThread.php';	
 	$LoadThread = new ServerLoadThread($config['sshHost']);
 }
 
+//Setup Main Loop
 $completed = 0;
 $failed = 0;
 $shortestTime = PHP_INT_MAX;
@@ -250,13 +37,15 @@ $KillThread = new KillThread();
 
 $Threads = array();
 for($i =0; $i < $config['threads']; $i++) {
-	$Threads[$i] = new UrlThread($config['url'],$config['timeBetweenRequest']);
+	$Threads[$i] = new UrlThread($config['url'],$config['timeBetweenRequest'],$config['method'],$arrPostData);
 }
 
 //Run Threads
-$LoadThread->start();
-while(!$LoadThread->isConnected()) {
-	sleep(3);
+if($LoadThread) {
+	$LoadThread->start();
+	while(!$LoadThread->isConnected()) {
+		sleep(3);
+	}
 }
 $KillThread->start();
 usleep(500);
@@ -266,16 +55,22 @@ sleep(3);
 
 echo "\r\n\r\n";
 $start = date('U');
-$spitStat = true;
 for($i = 0; true ; $i++) {
 	if($KillThread->shouldKillScript()) {
 		break;
 	}
 	
 	$i = $i % count($Threads);
-	while(!goodSystemLoad()) {
-		echo("Waiting on system load\r\n");
+	if(!defined('DISABLE_LOAD_LIMIT') && !goodSystemLoad()) {
+		echo("sleeping for 10 seconds... waiting on local system load\r\n");
 		sleep(10);
+		continue;
+	}
+	
+	if(!defined('DISABLE_LOAD_LIMIT') && $LoadThread && !$LoadThread->isSafeToContinue()) {
+		echo("sleeping for 15 seconds... waiting on server load: {$LoadThread->getLatestLoad()}\r\n");
+		sleep(15);
+		continue;
 	}
 	
 	//Check if the thread started
@@ -287,7 +82,6 @@ for($i = 0; true ; $i++) {
 	//Check if the thread is finished
 	if(!$Threads[$i]->isRunning() && ($completed + count($Threads)) < $config['totalRequests']) {
 		//Collect Results
-		echo "Finished Thread[{$i}] and resending\r\n";
 		$completed++;
 		$runtime = $Threads[$i]->getRuntime();
 		$totalTime += $runtime;
@@ -301,11 +95,10 @@ for($i = 0; true ; $i++) {
 			$shortestTime = $runtime;
 		}
 		
-		$Threads[$i] = new UrlThread($config['url'],$config['timeBetweenRequest']);
+		$Threads[$i] = new UrlThread($config['url'],$config['timeBetweenRequest'],$config['method'],$arrPostData);
 		$Threads[$i]->start();		
 	} elseif(!$Threads[$i]->isRunning()) {
 		//Collect Results
-		echo "Finished Thread[{$i}]\r\n";
 		$completed++;
 		$runtime = $Threads[$i]->getRuntime();
 		$totalTime += $runtime;
@@ -321,23 +114,41 @@ for($i = 0; true ; $i++) {
 		array_splice($Threads, $i,1);
 	}
 	
-// 	if( (date('U') - $start) % 60  <= 2 && $spitStat) {
-// 		$spitStat = false;
-// 		echo "-------------------------------------------------------------------------------------------------------------------------\r\n\r\n";
-// 		echo "Stats: Completed Requests - {$completed} | Failure Rate - ".($completed > 0 ? $failed/$completed*100 : 0)."% | Total Time - {$totalTime}s | Average Request - ".($completed > 0 ? $totalTime/$completed : 0)."s | Shortest Request - {$shortestTime}s | Longest Request - {$longestTime}s \r\n";
-// 		echo "\r\n-------------------------------------------------------------------------------------------------------------------------\r\n";
-// 	} else {
-// 		$spitStat = true;
-// 	}
+	if( (date('U') - $start) >= 10) {
+		$start = date('U') ;
+		$stat = "Status";
+		outputStats(array(
+			"stat"=>$stat,
+			"LoadThread"=>$LoadThread,
+			"completed"=>$completed,
+			"failed"=>$failed, 
+			"totalTime"=>$totalTime, 
+			"shortestTime"=>$shortestTime, 
+			"longestTime"=>$longestTime
+		));
+	}
 	
 	if(count($Threads) == 0) {
 		break;
 	}
 }
-echo "Fin: Sent Requests - {$completed} | Failure Rate - ".($completed > 0 ? $failed/$completed*100 : 0)."% | Total Time - {$totalTime}s | Average Request - ".($completed > 0 ? $totalTime/$completed : 0)."s | Shortest Request - {$shortestTime}s | Longest Request - {$longestTime}s \r\n";
 
-if($LoadThread) {
-	echo "Average Server Load: {$LoadThread->getAverage()} | Load Peaked At: {$LoadThread->getHighestLoad()}\r\n"; 
+$stat = "Fin";
+outputStats(array(
+		"stat"=>$stat,
+		"LoadThread"=>$LoadThread,
+		"completed"=>$completed,
+		"failed"=>$failed, 
+		"totalTime"=>$totalTime, 
+		"shortestTime"=>$shortestTime, 
+		"longestTime"=>$longestTime
+));
+foreach ($Threads as $Thread) {
+	if($Thread->isRunning()) {
+		$Thread->kill();
+	}
+}
+if($LoadThread && $LoadThread->isRunning()) {
 	$LoadThread->stopThread();
 }
 if($KillThread->isRunning()) {
@@ -345,3 +156,4 @@ if($KillThread->isRunning()) {
 	echo "Press 'K' and then 'Enter' to finish script:\r\n";
 }
 
+exit();

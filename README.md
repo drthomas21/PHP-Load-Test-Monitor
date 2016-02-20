@@ -5,7 +5,7 @@
 A PHP multithread script that will perform a load test as well as monitor the server load through SSH2 and CURL. This CLI tool is still in the alpha phase, but so far it is mostly functional.
 
 ## Requirements
-- PHP 5.6+ multithread
+- PHP 5.6 multithread (Does not work with PHP 7)
 - PHP cURL
 - PHP Readline
 - PHP SSH2
